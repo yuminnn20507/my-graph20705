@@ -14,7 +14,9 @@ st.set_page_config(
 )
 
 st.title("🎬 영화 데이터 그래프 도감 1 - 시간")
-st.write("영화의 일별 박스오피스 데이터를 시간의 흐름에 따라 살펴봅니다.")
+st.write(
+    "영화의 일별 박스오피스 데이터를 시간의 흐름에 따라 살펴봅니다."
+)
 
 
 # ============================================================
@@ -95,7 +97,7 @@ st.write(
 
 
 # ------------------------------------------------------------
-# 영화별 등장 횟수 계산
+# 영화별 등장 횟수
 # ------------------------------------------------------------
 
 movie_counts = (
@@ -104,7 +106,6 @@ movie_counts = (
     .sort_values(ascending=False)
 )
 
-# 데이터가 많은 영화부터 표시
 movie_list = movie_counts.index.tolist()
 
 
@@ -130,20 +131,19 @@ movie_df = movie_df.sort_values("날짜")
 
 
 # ------------------------------------------------------------
-# 그래프
+# 그래프 1
 # ------------------------------------------------------------
 
-fig = go.Figure()
+fig1 = go.Figure()
 
-
-fig.add_trace(
+fig1.add_trace(
     go.Scatter(
         x=movie_df["날짜"],
         y=movie_df["일관객"],
         mode="lines+markers",
         name=selected_movie,
+        connectgaps=False,
 
-        # 마우스를 올렸을 때 표시되는 내용
         hovertemplate=(
             "날짜: %{x|%Y-%m-%d}"
             "<br>일관객: %{y:,.0f}명"
@@ -152,28 +152,23 @@ fig.add_trace(
     )
 )
 
-
-# ------------------------------------------------------------
-# 그래프 모양 설정
-# ------------------------------------------------------------
-
-fig.update_layout(
+fig1.update_layout(
     title=f"「{selected_movie}」 날짜별 일관객 변화",
 
     xaxis_title="날짜",
     yaxis_title="일관객 수 (명)",
 
-    # X축을 날짜로 명확하게 설정
     xaxis=dict(
         type="date",
         tickformat="%Y-%m-%d",
         hoverformat="%Y-%m-%d"
     ),
 
-    # Y축 숫자에 쉼표 표시
     yaxis=dict(
         tickformat=","
     ),
+
+    hovermode="x",
 
     height=500,
 
@@ -182,21 +177,14 @@ fig.update_layout(
         r=40,
         t=70,
         b=40
-    ),
-
-    hovermode="x"
+    )
 )
 
-
 st.plotly_chart(
-    fig,
+    fig1,
     use_container_width=True
 )
 
-
-# ------------------------------------------------------------
-# 선택한 영화의 데이터 개수
-# ------------------------------------------------------------
 
 st.caption(
     f"이 영화는 전체 기간 중 {len(movie_df)}일 동안 10위권에 기록되었습니다."
@@ -204,7 +192,7 @@ st.caption(
 
 
 # ============================================================
-# 이 그래프로 알 수 있는 것
+# 그래프 1 - 이 그래프로 알 수 있는 것
 # ============================================================
 
 st.markdown("### 💡 이 그래프로 알 수 있는 것")
@@ -215,15 +203,159 @@ st.write(
 
 
 # ============================================================
-# 그래프 2
+# 그래프 2. 일관객 합계 TOP 5 영화 비교
 # ============================================================
 
 st.divider()
 
-st.header("📊 그래프 2")
+st.header("📊 그래프 2. 일관객 합계 TOP 5 영화 비교")
 
-st.info(
-    "앞으로 추가할 그래프 영역입니다."
+st.write(
+    "이 기간 동안 일관객의 합계가 가장 큰 5편의 영화가 날짜별로 "
+    "어떻게 변화했는지 비교합니다."
+)
+
+
+# ------------------------------------------------------------
+# 기간 전체의 일관객 합계 계산
+# ------------------------------------------------------------
+
+movie_total = (
+    df.groupby("영화명")["일관객"]
+    .sum()
+    .sort_values(ascending=False)
+)
+
+
+# 일관객 합계가 가장 큰 5편
+top5_movies = movie_total.head(5).index.tolist()
+
+
+# ------------------------------------------------------------
+# 그래프 2
+# ------------------------------------------------------------
+
+fig2 = go.Figure()
+
+
+for movie in top5_movies:
+
+    # 해당 영화의 날짜별 데이터
+    movie_data = (
+        df[df["영화명"] == movie]
+        .groupby("날짜", as_index=False)["일관객"]
+        .sum()
+    )
+
+    # 전체 기간의 모든 날짜를 만들어 줌
+    # 영화가 그날 10위권에 없으면 NaN이 됨
+    # → 그래프에서 선이 끊어짐
+    all_dates = pd.date_range(
+        start=df["날짜"].min(),
+        end=df["날짜"].max(),
+        freq="D"
+    )
+
+    movie_data = (
+        movie_data
+        .set_index("날짜")
+        .reindex(all_dates)
+        .rename_axis("날짜")
+        .reset_index()
+    )
+
+    fig2.add_trace(
+        go.Scatter(
+            x=movie_data["날짜"],
+            y=movie_data["일관객"],
+            mode="lines+markers",
+            name=movie,
+
+            # 데이터가 없는 날짜는 선으로 연결하지 않음
+            connectgaps=False,
+
+            hovertemplate=(
+                "영화: " + movie +
+                "<br>날짜: %{x|%Y-%m-%d}" +
+                "<br>일관객: %{y:,.0f}명" +
+                "<extra></extra>"
+            )
+        )
+    )
+
+
+# ------------------------------------------------------------
+# 그래프 2 모양 설정
+# ------------------------------------------------------------
+
+fig2.update_layout(
+    title="일관객 합계가 가장 큰 5편의 날짜별 변화",
+
+    xaxis_title="날짜",
+    yaxis_title="일관객 수 (명)",
+
+    xaxis=dict(
+        type="date",
+        tickformat="%Y-%m-%d",
+        hoverformat="%Y-%m-%d"
+    ),
+
+    yaxis=dict(
+        tickformat=","
+    ),
+
+    hovermode="x unified",
+
+    height=600,
+
+    margin=dict(
+        l=40,
+        r=40,
+        t=80,
+        b=40
+    ),
+
+    # 범례를 그래프 위쪽에 배치
+    legend=dict(
+        orientation="h",
+        yanchor="bottom",
+        y=1.02,
+        xanchor="left",
+        x=0
+    )
+)
+
+
+st.plotly_chart(
+    fig2,
+    use_container_width=True
+)
+
+
+# ------------------------------------------------------------
+# TOP 5 영화의 일관객 합계 표시
+# ------------------------------------------------------------
+
+st.markdown("#### 🏆 이 기간 일관객 합계 TOP 5")
+
+for i, movie in enumerate(top5_movies, start=1):
+
+    total = movie_total[movie]
+
+    st.write(
+        f"{i}위. **{movie}** — "
+        f"{total:,.0f}명"
+    )
+
+
+# ============================================================
+# 그래프 2 - 이 그래프로 알 수 있는 것
+# ============================================================
+
+st.markdown("### 💡 이 그래프로 알 수 있는 것")
+
+st.write(
+    "이 기간 동안 관객을 많이 모은 영화 5편의 흥행 규모와 날짜별 관객 변화 양상을 비교할 수 있습니다."
 )
 
 
