@@ -1,672 +1,556 @@
 import streamlit as st
+import requests
 import pandas as pd
-import plotly.graph_objects as go
+from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 
 
-# ============================================================
-# 페이지 설정
-# ============================================================
+# ==================================================
+# 1. 페이지 기본 설정
+# ==================================================
 
 st.set_page_config(
-    page_title="영화 데이터 그래프 도감 1 - 시간",
+    page_title="어제의 박스오피스",
     page_icon="🎬",
     layout="wide"
 )
 
-st.title("🎬 영화 데이터 그래프 도감 1 - 시간")
-st.write(
-    "영화의 일별 박스오피스 데이터를 시간의 흐름에 따라 살펴봅니다."
+st.title("🎬 박스오피스")
+st.caption("KOBIS 영화관입장권통합전산망의 일일 박스오피스를 보여 줍니다.")
+
+
+# ==================================================
+# 2. 한국 시간 기준 날짜 계산
+# ==================================================
+# Streamlit Cloud 서버는 한국 시간이 아닐 수 있습니다.
+# 따라서 반드시 한국 시간(Asia/Seoul)을 기준으로 합니다.
+
+KST = ZoneInfo("Asia/Seoul")
+
+now_korea = datetime.now(KST)
+
+# 오늘 날짜
+today_korea = now_korea.date()
+
+# 선택할 수 있는 가장 늦은 날짜 = 어제
+yesterday = today_korea - timedelta(days=1)
+
+
+# ==================================================
+# 3. KOBIS API 주소
+# ==================================================
+
+API_URL = (
+    "https://www.kobis.or.kr/kobisopenapi/webservice/rest/"
+    "boxoffice/searchDailyBoxOfficeList.json"
 )
 
 
-# ============================================================
-# 데이터 불러오기
-# ============================================================
+# ==================================================
+# 4. KOBIS API에서 박스오피스 가져오기
+# ==================================================
+# 같은 날짜를 다시 조회하면 1시간 동안 저장된 결과를 사용합니다.
+# 따라서 같은 날짜로 계속 조회해도 API를 매번 호출하지 않습니다.
 
-DATA_URL = (
-    "https://raw.githubusercontent.com/greatsong/modudata/"
-    "main/data/kobis_daily.csv"
+@st.cache_data(ttl=3600)
+def get_boxoffice(target_date):
+
+    # --------------------------------------------------
+    # Secrets에서 인증키 가져오기
+    # --------------------------------------------------
+    try:
+        api_key = st.secrets["KOBIS_KEY"]
+
+    except Exception:
+        return {
+            "success": False,
+            "message": (
+                "KOBIS_KEY를 찾을 수 없습니다.\n\n"
+                "Streamlit Cloud → App settings → Secrets에서 "
+                "`KOBIS_KEY`가 정확한 이름으로 등록되어 있는지 확인하세요."
+            ),
+            "data": None
+        }
+
+    # --------------------------------------------------
+    # API 요청
+    # --------------------------------------------------
+    params = {
+        "key": api_key,
+        "targetDt": target_date
+    }
+
+    try:
+        response = requests.get(
+            API_URL,
+            params=params,
+            timeout=10
+        )
+
+        response.raise_for_status()
+
+        data = response.json()
+
+    except requests.exceptions.Timeout:
+        return {
+            "success": False,
+            "message": (
+                "KOBIS API 응답 시간이 초과되었습니다.\n\n"
+                "잠시 후 다시 시도해 주세요."
+            ),
+            "data": None
+        }
+
+    except requests.exceptions.RequestException as e:
+        return {
+            "success": False,
+            "message": (
+                "KOBIS API 요청에 실패했습니다.\n\n"
+                f"오류 내용: {e}\n\n"
+                "인터넷 연결이나 KOBIS API 서버 상태를 확인해 주세요."
+            ),
+            "data": None
+        }
+
+    except ValueError:
+        return {
+            "success": False,
+            "message": (
+                "KOBIS API의 응답을 읽을 수 없습니다.\n\n"
+                "KOBIS API 서버 상태를 확인해 주세요."
+            ),
+            "data": None
+        }
+
+    # --------------------------------------------------
+    # 인증키 오류 확인
+    # --------------------------------------------------
+    # KOBIS는 인증키가 틀려도 HTTP 상태코드가 200일 수 있습니다.
+    # 따라서 faultInfo가 있는지 반드시 확인합니다.
+
+    if "faultInfo" in data:
+
+        fault_info = data["faultInfo"]
+
+        fault_code = fault_info.get(
+            "errorCode",
+            "알 수 없음"
+        )
+
+        fault_message = fault_info.get(
+            "errorMessage",
+            "알 수 없는 오류입니다."
+        )
+
+        return {
+            "success": False,
+            "message": (
+                "KOBIS API에서 오류를 반환했습니다.\n\n"
+                f"오류 코드: {fault_code}\n"
+                f"오류 내용: {fault_message}\n\n"
+                "Streamlit Cloud의 Secrets에 등록한 "
+                "`KOBIS_KEY`가 정확한지 확인하세요."
+            ),
+            "data": None
+        }
+
+    # --------------------------------------------------
+    # boxOfficeResult 확인
+    # --------------------------------------------------
+
+    boxoffice_result = data.get("boxOfficeResult")
+
+    if not boxoffice_result:
+        return {
+            "success": False,
+            "message": (
+                "KOBIS API 응답에 박스오피스 정보가 없습니다.\n\n"
+                "KOBIS API 서버 상태를 확인해 주세요."
+            ),
+            "data": None
+        }
+
+    # 영화 목록 가져오기
+    movie_list = boxoffice_result.get(
+        "dailyBoxOfficeList",
+        []
+    )
+
+    # --------------------------------------------------
+    # 영화 목록이 비어 있는 경우
+    # --------------------------------------------------
+    # 사용자가 날짜를 선택했지만 데이터가 없다면
+    # 빈 화면 대신 이해하기 쉬운 메시지를 보여 줍니다.
+
+    if not movie_list:
+        return {
+            "success": True,
+            "message": "그날은 아직 집계 전입니다.",
+            "data": []
+        }
+
+    return {
+        "success": True,
+        "message": "",
+        "data": movie_list
+    }
+
+
+# ==================================================
+# 5. 날짜 선택
+# ==================================================
+
+st.markdown("### 📅 조회할 날짜")
+
+selected_date = st.date_input(
+    "박스오피스를 확인할 날짜를 선택하세요.",
+    value=yesterday,
+    max_value=yesterday,
+    format="YYYY-MM-DD"
 )
 
+# KOBIS API가 요구하는 날짜 형식
+target_date = selected_date.strftime("%Y%m%d")
 
-@st.cache_data
-def load_data():
+# 화면에 표시할 날짜
+display_date = selected_date.strftime("%Y-%m-%d")
 
-    df = pd.read_csv(
-        DATA_URL,
-        encoding="utf-8-sig"
+
+# ==================================================
+# 6. 선택한 날짜의 박스오피스 가져오기
+# ==================================================
+
+result = get_boxoffice(target_date)
+
+
+# ==================================================
+# 7. API 요청 자체가 실패한 경우
+# ==================================================
+
+if not result["success"]:
+
+    st.error("⚠️ 박스오피스 정보를 가져오지 못했습니다.")
+
+    st.warning(result["message"])
+
+    st.info(
+        "💡 확인할 것\n\n"
+        "1. Streamlit Cloud → App settings → Secrets에서 "
+        "`KOBIS_KEY`가 등록되어 있는지 확인하세요.\n\n"
+        "2. 인증키를 복사할 때 불필요한 문자가 들어가지 않았는지 확인하세요.\n\n"
+        "3. KOBIS API 서버가 정상적으로 동작하는지 확인하세요."
     )
 
-    # 날짜를 진짜 날짜 형식으로 변환
-    df["날짜"] = pd.to_datetime(
-        df["날짜"].astype(str),
-        format="%Y%m%d",
-        errors="coerce"
+    st.stop()
+
+
+# ==================================================
+# 8. 영화 목록이 없는 경우
+# ==================================================
+
+movie_list = result["data"]
+
+if not movie_list:
+
+    st.warning(
+        f"📭 {display_date}의 박스오피스 데이터가 없습니다."
     )
 
-    # 숫자 열을 숫자로 변환
-    numeric_columns = [
-        "순위",
-        "영화코드",
-        "일관객",
-        "누적관객",
-        "스크린수",
-        "상영횟수"
-    ]
+    st.info(
+        "그날은 아직 집계 전입니다.\n\n"
+        "다른 날짜를 선택해 보세요."
+    )
 
-    for column in numeric_columns:
+    st.stop()
+
+
+# ==================================================
+# 9. DataFrame으로 변환
+# ==================================================
+
+df = pd.DataFrame(movie_list)
+
+
+# ==================================================
+# 10. 숫자 데이터를 실제 숫자로 변환
+# ==================================================
+# KOBIS API에서는 숫자도 문자열로 보내 줍니다.
+#
+# 예:
+# "1" → 1
+# "259744" → 259744
+#
+# 숫자로 변환해야 정렬과 그래프에 제대로 사용할 수 있습니다.
+
+number_columns = [
+    "rank",
+    "rankInten",
+    "audiCnt",
+    "audiAcc",
+    "scrnCnt",
+    "showCnt"
+]
+
+for column in number_columns:
+
+    if column in df.columns:
+
         df[column] = pd.to_numeric(
             df[column],
             errors="coerce"
-        )
-
-    # 필요한 데이터가 없는 행 제거
-    df = df.dropna(
-        subset=["날짜", "영화명", "일관객"]
-    )
-
-    df = df.sort_values("날짜")
-
-    return df
+        ).fillna(0).astype(int)
 
 
-df = load_data()
+# ==================================================
+# 11. 순위 기준으로 정렬
+# ==================================================
+
+df = df.sort_values(
+    "rank",
+    ascending=True
+).reset_index(drop=True)
 
 
-# ============================================================
-# 기본 정보
-# ============================================================
+# ==================================================
+# 12. 화면 상단 날짜 표시
+# ==================================================
 
-st.caption(
-    f"📊 총 {len(df):,}개의 일별 영화 기록을 불러왔습니다."
-)
-
-
-# ============================================================
-# 그래프 1. 영화별 일관객 변화
-# ============================================================
-
-st.divider()
-
-st.header("📈 그래프 1. 영화별 일관객 변화")
-
-st.write(
-    "영화를 하나 선택하면 해당 영화의 날짜별 일관객 수 변화를 확인할 수 있습니다."
-)
-
-
-movie_counts = (
-    df["영화명"]
-    .value_counts()
-    .sort_values(ascending=False)
-)
-
-movie_list = movie_counts.index.tolist()
-
-selected_movie = st.selectbox(
-    "영화를 선택하세요.",
-    movie_list
-)
-
-
-movie_df = df[
-    df["영화명"] == selected_movie
-].copy()
-
-movie_df = movie_df.sort_values("날짜")
-
-
-fig1 = go.Figure()
-
-fig1.add_trace(
-    go.Scatter(
-        x=movie_df["날짜"],
-        y=movie_df["일관객"],
-        mode="lines+markers",
-        name=selected_movie,
-        connectgaps=False,
-
-        hovertemplate=(
-            "날짜: %{x|%Y-%m-%d}"
-            "<br>일관객: %{y:,.0f}명"
-            "<extra></extra>"
-        )
-    )
-)
-
-fig1.update_layout(
-    title=f"「{selected_movie}」 날짜별 일관객 변화",
-
-    xaxis_title="날짜",
-    yaxis_title="일관객 수 (명)",
-
-    xaxis=dict(
-        type="date",
-        tickformat="%Y-%m-%d",
-        hoverformat="%Y-%m-%d"
-    ),
-
-    yaxis=dict(
-        tickformat=","
-    ),
-
-    hovermode="x",
-    height=500,
-
-    margin=dict(
-        l=40,
-        r=40,
-        t=70,
-        b=40
-    )
-)
-
-st.plotly_chart(
-    fig1,
-    use_container_width=True
+st.subheader(
+    f"📅 {display_date} 박스오피스"
 )
 
 st.caption(
-    f"이 영화는 전체 기간 중 {len(movie_df)}일 동안 10위권에 기록되었습니다."
+    f"한국 시간 기준 · 총 {len(df)}편"
 )
 
 
-st.markdown("### 💡 이 그래프로 알 수 있는 것")
+# ==================================================
+# 13. 1위 영화 정보
+# ==================================================
 
-st.write(
-    "영화의 일관객 수가 날짜에 따라 어떻게 증가하거나 감소하는지 확인할 수 있습니다."
-)
+first_movie = df.iloc[0]
 
-
-# ============================================================
-# 그래프 2. 일관객 합계 TOP 5
-# ============================================================
-
-st.divider()
-
-st.header("📊 그래프 2. 일관객 합계 TOP 5")
-
-st.write(
-    "이 기간 동안 일관객 합계가 가장 큰 5편의 영화가 "
-    "날짜별로 어떻게 변화했는지 비교합니다."
-)
+first_movie_name = first_movie["movieNm"]
+first_audience = first_movie["audiCnt"]
+first_total = first_movie["audiAcc"]
 
 
-movie_total = (
-    df.groupby("영화명")["일관객"]
-    .sum()
-    .sort_values(ascending=False)
-)
-
-top5_movies = movie_total.head(5).index.tolist()
+st.markdown("### 🥇 1위 영화")
 
 
-fig2 = go.Figure()
+# ==================================================
+# 14. 1위 영화 지표 카드
+# ==================================================
 
-all_dates = pd.date_range(
-    start=df["날짜"].min(),
-    end=df["날짜"].max(),
-    freq="D"
-)
+card1, card2, card3 = st.columns(3)
 
 
-for movie in top5_movies:
+with card1:
 
-    movie_data = (
-        df[df["영화명"] == movie]
-        .groupby("날짜")["일관객"]
-        .sum()
-    )
-
-    movie_data = movie_data.reindex(all_dates)
-
-    fig2.add_trace(
-        go.Scatter(
-            x=all_dates,
-            y=movie_data,
-            mode="lines+markers",
-            name=movie,
-            connectgaps=False,
-
-            hovertemplate=(
-                "영화: " + movie +
-                "<br>날짜: %{x|%Y-%m-%d}" +
-                "<br>일관객: %{y:,.0f}명" +
-                "<extra></extra>"
-            )
-        )
+    st.metric(
+        label="🎬 영화",
+        value=first_movie_name
     )
 
 
-fig2.update_layout(
-    title="일관객 합계가 가장 큰 5편의 날짜별 변화",
+with card2:
 
-    xaxis_title="날짜",
-    yaxis_title="일관객 수 (명)",
-
-    xaxis=dict(
-        type="date",
-        tickformat="%Y-%m-%d"
-    ),
-
-    yaxis=dict(
-        tickformat=","
-    ),
-
-    hovermode="x unified",
-    height=600,
-
-    margin=dict(
-        l=40,
-        r=40,
-        t=80,
-        b=40
-    ),
-
-    legend=dict(
-        orientation="h",
-        yanchor="bottom",
-        y=1.02,
-        xanchor="left",
-        x=0
-    )
-)
-
-st.plotly_chart(
-    fig2,
-    use_container_width=True
-)
-
-
-st.markdown("#### 🏆 이 기간 일관객 합계 TOP 5")
-
-for i, movie in enumerate(top5_movies, start=1):
-
-    st.write(
-        f"{i}위. **{movie}** — "
-        f"{movie_total[movie]:,.0f}명"
+    st.metric(
+        label="👥 일일 관객수",
+        value=f"{first_audience:,}명"
     )
 
 
-st.markdown("### 💡 이 그래프로 알 수 있는 것")
+with card3:
 
-st.write(
-    "이 기간 동안 관객을 많이 모은 영화 5편의 흥행 규모와 "
-    "날짜별 관객 변화 양상을 비교할 수 있습니다."
-)
-
-
-# ============================================================
-# 그래프 3. 날짜별 10위권 일관객 합계
-# ============================================================
-
-st.divider()
-
-st.header("📊 그래프 3. 날짜별 10위권 일관객 합계")
-
-st.write(
-    "날짜별로 그날 박스오피스 10위권 영화의 일관객을 모두 더해 "
-    "전체적인 영화 관객 규모의 변화를 확인합니다."
-)
-
-
-daily_total = (
-    df.groupby("날짜")["일관객"]
-    .sum()
-    .reset_index()
-    .sort_values("날짜")
-)
-
-
-top3_days = (
-    daily_total
-    .nlargest(3, "일관객")
-    .sort_values("일관객", ascending=False)
-)
-
-
-fig3 = go.Figure()
-
-fig3.add_trace(
-    go.Scatter(
-        x=daily_total["날짜"],
-        y=daily_total["일관객"],
-        mode="lines",
-        name="10위권 일관객 합계",
-        fill="tozeroy",
-
-        hovertemplate=(
-            "날짜: %{x|%Y-%m-%d}"
-            "<br>10위권 일관객 합계: %{y:,.0f}명"
-            "<extra></extra>"
-        )
-    )
-)
-
-
-for _, row in top3_days.iterrows():
-
-    date = row["날짜"]
-    total = row["일관객"]
-
-    fig3.add_annotation(
-        x=date,
-        y=total,
-
-        text=(
-            f"<b>{date.strftime('%Y-%m-%d')}</b>"
-            f"<br>{total:,.0f}명"
-        ),
-
-        showarrow=True,
-        arrowhead=2,
-        ax=0,
-        ay=-60,
-
-        font=dict(size=13),
-
-        bgcolor="white",
-        bordercolor="gray",
-        borderwidth=1,
-        borderpad=5
+    st.metric(
+        label="👥 누적 관객수",
+        value=f"{first_total:,}명"
     )
 
 
-fig3.update_layout(
-    title="날짜별 10위권 일관객 합계",
+# ==================================================
+# 15. 관객수 상위 5편
+# ==================================================
 
-    xaxis_title="날짜",
-    yaxis_title="10위권 일관객 합계 (명)",
-
-    xaxis=dict(
-        type="date",
-        tickformat="%Y-%m-%d"
-    ),
-
-    yaxis=dict(
-        tickformat=","
-    ),
-
-    hovermode="x",
-    height=550,
-
-    margin=dict(
-        l=40,
-        r=40,
-        t=100,
-        b=40
-    )
-)
-
-st.plotly_chart(
-    fig3,
-    use_container_width=True
-)
+st.markdown("### 📊 관객수 상위 5편")
 
 
-st.markdown("#### 🏆 일관객 합계가 가장 컸던 날")
-
-for i, (_, row) in enumerate(
-    top3_days.iterrows(),
-    start=1
-):
-
-    st.write(
-        f"{i}위. **{row['날짜'].strftime('%Y-%m-%d')}** — "
-        f"{row['일관객']:,.0f}명"
-    )
-
-
-st.markdown("### 💡 이 그래프로 알 수 있는 것")
-
-st.write(
-    "날짜별로 영화관 전체의 관객 규모가 어떻게 변했는지와 "
-    "관객이 가장 많이 몰린 날이 언제였는지 확인할 수 있습니다."
-)
-
-
-# ============================================================
-# 그래프 4. 영화별 일관객 합계 TOP 10
-# ============================================================
-
-st.divider()
-
-st.header("📊 그래프 4. 영화별 일관객 합계 TOP 10")
-
-st.write(
-    "이 기간 동안 일관객을 가장 많이 모은 영화 10편을 비교합니다."
-)
-
-
-movie_summary = (
-    df.groupby("영화명")
-    .agg(
-        일관객합계=("일관객", "sum"),
-        기록일수=("날짜", "nunique")
-    )
-    .sort_values(
-        "일관객합계",
+top5 = (
+    df.sort_values(
+        "audiCnt",
         ascending=False
     )
+    .head(5)
+    .copy()
 )
 
 
-top10_movies = movie_summary.head(10).copy()
+# 영화명을 그래프의 이름으로 사용
+top5_chart = top5.set_index(
+    "movieNm"
+)[["audiCnt"]]
 
 
-fig4 = go.Figure()
-
-fig4.add_trace(
-    go.Bar(
-        x=top10_movies["일관객합계"],
-        y=top10_movies.index,
-        orientation="h",
-
-        name="일관객 합계",
-
-        customdata=top10_movies["기록일수"],
-
-        hovertemplate=(
-            "영화: %{y}"
-            "<br>일관객 합계: %{x:,.0f}명"
-            "<br>10위권 기록 일수: %{customdata}일"
-            "<extra></extra>"
-        )
-    )
+# 가로 막대그래프
+st.bar_chart(
+    top5_chart,
+    y="audiCnt",
+    horizontal=True
 )
 
 
-fig4.update_layout(
-    title="영화별 일관객 합계 TOP 10",
+# ==================================================
+# 16. 전체 박스오피스 표
+# ==================================================
 
-    xaxis_title="일관객 합계 (명)",
-    yaxis_title="영화",
+st.markdown("### 🎞️ 전체 박스오피스")
 
-    xaxis=dict(
-        tickformat=","
-    ),
 
-    yaxis=dict(
-        autorange="reversed"
-    ),
+# --------------------------------------------------
+# 표에 사용할 데이터 복사
+# --------------------------------------------------
 
-    height=600,
+table_df = df[
+    [
+        "rank",
+        "rankInten",
+        "movieNm",
+        "openDt",
+        "audiCnt",
+        "audiAcc",
+        "scrnCnt"
+    ]
+].copy()
 
-    margin=dict(
-        l=40,
-        r=40,
-        t=80,
-        b=40
-    )
+
+# ==================================================
+# 17. 순위 증감 표시
+# ==================================================
+# rankInten
+#
+# 양수 → 순위 상승 → 빨간색 ↑
+# 음수 → 순위 하락 → 파란색 ↓
+# 0    → 변동 없음
+#
+# 예:
+# +2 → 🔴 ↑2
+# -1 → 🔵 ↓1
+#  0 → -
+#
+# 표에서는 이 값을 보기 좋게 문자열로 만들어 줍니다.
+
+def make_rank_change(value):
+
+    if value > 0:
+        return f"🔴 ↑{value}"
+
+    elif value < 0:
+        return f"🔵 ↓{abs(value)}"
+
+    else:
+        return "-"
+
+
+table_df["순위 변동"] = table_df[
+    "rankInten"
+].apply(make_rank_change)
+
+
+# ==================================================
+# 18. 누적 관객 100만 명 이상이면 트로피 추가
+# ==================================================
+# 1,000,000명 이상인 영화 이름 뒤에 🏆를 붙입니다.
+
+def add_trophy(row):
+
+    movie_name = row["movieNm"]
+    accumulated = row["audiAcc"]
+
+    if accumulated >= 1_000_000:
+        return f"{movie_name} 🏆"
+
+    return movie_name
+
+
+table_df["영화명"] = table_df.apply(
+    add_trophy,
+    axis=1
 )
 
-st.plotly_chart(
-    fig4,
-    use_container_width=True
-)
 
+# ==================================================
+# 19. 표의 열 이름 변경
+# ==================================================
 
-st.markdown("#### 🏆 일관객 합계 TOP 10")
-
-for i, (movie, row) in enumerate(
-    top10_movies.iterrows(),
-    start=1
-):
-
-    st.write(
-        f"{i}위. **{movie}** — "
-        f"{row['일관객합계']:,.0f}명 "
-        f"({row['기록일수']}일)"
-    )
-
-
-st.markdown("### 💡 이 그래프로 알 수 있는 것")
-
-st.write(
-    "이 기간 동안 어떤 영화가 가장 많은 관객을 모았는지와 "
-    "각 영화가 10위권에 얼마나 오래 머물렀는지를 비교할 수 있습니다."
-)
-
-
-# ============================================================
-# 그래프 5. 월 × 요일별 일관객 합계
-# ============================================================
-
-st.divider()
-
-st.header("📊 그래프 5. 월 × 요일별 일관객 합계")
-
-st.write(
-    "날짜의 월과 요일을 기준으로 10위권 일관객 합계를 비교합니다."
-)
-
-
-# ------------------------------------------------------------
-# 월과 요일 추출
-# ------------------------------------------------------------
-
-heatmap_df = df.copy()
-
-heatmap_df["월"] = heatmap_df["날짜"].dt.month
-heatmap_df["요일번호"] = heatmap_df["날짜"].dt.weekday
-
-
-weekday_names = [
-    "월요일",
-    "화요일",
-    "수요일",
-    "목요일",
-    "금요일",
-    "토요일",
-    "일요일"
+table_df = table_df[
+    [
+        "rank",
+        "순위 변동",
+        "영화명",
+        "openDt",
+        "audiCnt",
+        "audiAcc",
+        "scrnCnt"
+    ]
 ]
 
 
-heatmap_df["요일"] = heatmap_df["요일번호"].map(
-    lambda x: weekday_names[x]
+table_df.columns = [
+    "순위",
+    "순위 변동",
+    "영화명",
+    "개봉일",
+    "관객수",
+    "누적관객",
+    "스크린수"
+]
+
+
+# ==================================================
+# 20. 숫자에 천 단위 쉼표 표시
+# ==================================================
+# 화면에서 보기 좋게 만들기 위한 작업입니다.
+#
+# 실제 계산용 df의 숫자는 그대로 숫자입니다.
+
+table_df["관객수"] = table_df[
+    "관객수"
+].map(
+    lambda x: f"{x:,}"
 )
 
 
-# ------------------------------------------------------------
-# 월 × 요일별 일관객 합계
-# ------------------------------------------------------------
-
-heatmap_data = (
-    heatmap_df
-    .groupby(["월", "요일번호", "요일"])["일관객"]
-    .sum()
-    .reset_index()
+table_df["누적관객"] = table_df[
+    "누적관객"
+].map(
+    lambda x: f"{x:,}"
 )
 
 
-# ------------------------------------------------------------
-# 히트맵 표 만들기
-# ------------------------------------------------------------
-
-heatmap_pivot = (
-    heatmap_data
-    .pivot(
-        index="월",
-        columns="요일번호",
-        values="일관객"
-    )
-    .reindex(
-        index=range(1, 13),
-        columns=range(7)
-    )
+table_df["스크린수"] = table_df[
+    "스크린수"
+].map(
+    lambda x: f"{x:,}"
 )
 
 
-# ------------------------------------------------------------
-# 히트맵
-# ------------------------------------------------------------
+# ==================================================
+# 21. 표 출력
+# ==================================================
 
-fig5 = go.Figure()
-
-fig5.add_trace(
-    go.Heatmap(
-        x=weekday_names,
-
-        y=[
-            f"{month}월"
-            for month in range(1, 13)
-        ],
-
-        z=heatmap_pivot.values,
-
-        colorscale="Blues",
-
-        hovertemplate=(
-            "%{y} %{x}"
-            "<br>일관객 합계: %{z:,.0f}명"
-            "<extra></extra>"
-        ),
-
-        colorbar=dict(
-            title="일관객<br>합계"
-        )
-    )
+st.dataframe(
+    table_df,
+    use_container_width=True,
+    hide_index=True
 )
 
 
-fig5.update_layout(
-    title="월 × 요일별 10위권 일관객 합계",
+# ==================================================
+# 22. 데이터 출처
+# ==================================================
 
-    xaxis_title="요일",
-    yaxis_title="월",
-
-    height=650,
-
-    margin=dict(
-        l=50,
-        r=50,
-        t=80,
-        b=50
-    )
-)
-
-
-st.plotly_chart(
-    fig5,
-    use_container_width=True
-)
-
-
-st.markdown("### 💡 이 그래프로 알 수 있는 것")
-
-st.write(
-    "어떤 달과 요일에 영화 관객이 많이 몰렸는지 한눈에 비교할 수 있습니다."
-)
-
-
-# ============================================================
-# 그래프 6
-# ============================================================
-
-st.divider()
-
-st.header("📊 그래프 6")
-
-st.info(
-    "앞으로 추가할 그래프 영역입니다."
+st.caption(
+    "데이터 출처: 영화관입장권통합전산망(KOBIS) "
+    "일일 박스오피스 API"
 )
